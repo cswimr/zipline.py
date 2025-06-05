@@ -1,7 +1,7 @@
 import sys
 from typing import Optional
 
-from rich import print
+from rich import print, print_json
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from typer import Argument, Option, Typer
 
@@ -33,17 +33,17 @@ async def shorten(
         prompt=True,
         hide_input=True,
     ),
-    print_object: bool = Option(
+    use_json: bool = Option(
         ...,
-        "--object/--text",
-        "-o/-O",
+        "--json/--text",
+        "-j/-J",
         default_factory=sys.stdout.isatty,
         help=(
             "Choose how to format the output. "
             "If --text (or piped), you'll get the shortened URL; "
-            "if --object (or on a TTY), you'll get the raw Python object."
+            "if --object (or on a TTY), you'll get the raw Python object as JSON."
         ),
-        envvar="ZIPLINE_PRINT_OBJECT",
+        envvar="ZIPLINE_PRINT_JSON",
     ),
     vanity: Optional[str] = Option(
         None,
@@ -91,6 +91,7 @@ async def shorten(
             except Exception as exception:
                 handle_api_errors(exception, server_url, traceback=verbose)
 
-    if print_object:
-        print(shortened_url)
-    print(shortened_url.full_url)
+    if use_json:
+        print_json(data=shortened_url.__json__())
+    else:
+        print(shortened_url.full_url)

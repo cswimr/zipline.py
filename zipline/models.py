@@ -27,22 +27,23 @@ import datetime
 import io
 import mimetypes
 import os
-from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Sequence, Type, Union
 
+from casefy import camelcase
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, computed_field, field_validator
+
 from .enums import FileSearchField, FileSearchSort, OAuthProviderType, Order, QuotaType, RecentFilesFilter, UserRole
-from .errors import ZiplineError
 from .http import HTTPClient, Route
 from .utils import (
     MISSING,
     build_avatar_payload,
     generate_quota_payload,
     guess_mimetype_by_magicnumber,
-    key_valid_not_none,
     parse_iso_timestamp,
 )
 
 __all__ = (
+    "ZiplineModel",
     "File",
     "Folder",
     "User",
@@ -68,8 +69,36 @@ __all__ = (
 JSON = Union[Dict[str, Any], List[Any], int, str, float, bool, Type[None]]
 
 
-@dataclass
-class File:
+class ZiplineModel(BaseModel):
+    """
+    Base model class used to represent data structures returned from the Zipline API.
+    """
+
+    model_config = ConfigDict(
+        alias_generator=camelcase,
+        arbitrary_types_allowed=True,
+        populate_by_name=True,
+        validate_default=True,
+    )
+
+    @field_validator("created_at", "deletes_at", "updated_at", mode="before", check_fields=False)
+    @classmethod
+    def _timestamp_validator(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return parse_iso_timestamp(value)
+        if isinstance(value, datetime):
+            return value
+        raise ValueError(f"Invalid datetime passed! {value}")
+
+    def __json__(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class _ZiplineClientModel(ZiplineModel):
+    http: HTTPClient = Field(exclude=True)
+
+
+class File(_ZiplineClientModel):
     """
     Represents a file stored on Zipline.
 
@@ -115,69 +144,32 @@ class File:
         The url of this file, if given.
     """
 
-    __slots__ = (
-        "_http",
-        "id",
-        "created_at",
-        "updated_at",
-        "deletes_at",
-        "favorite",
-        "original_name",
-        "name",
-        "size",
-        "type",
-        "views",
-        "max_views",
-        "password",
-        "folder_id",
-        "thumbnail",
-        "tags",
-        "url",
-    )
-
-    _http: HTTPClient
     id: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
-    deletes_at: Optional[datetime.datetime]
+    deletes_at: Optional[datetime.datetime] = None
     favorite: bool
-    original_name: Optional[str]
+    original_name: Optional[str] = None
     name: str
     size: int
     type: str
     views: int
-    max_views: Optional[int]
-    password: Optional[Union[str, bool]]
-    folder_id: Optional[str]
-    thumbnail: Optional[Thumbnail]
-    tags: Optional[List[Tag]]
-    url: Optional[str]
+    max_views: Optional[int] = None
+    password: Optional[Union[str, bool]] = None
+    folder_id: Optional[str] = None
+    thumbnail: Optional[Thumbnail] = None
+    tags: Optional[List[Tag]] = None
+    url: Optional[str] = None
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _validate_tags(cls, value: Any, info: ValidationInfo) -> Optional[List[Tag]]:
+        return [Tag(http=info.data["http"], **tag_data) for tag_data in value] if value else None
 
     def __str__(self) -> str:
         return self.full_url
 
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /, *, http: HTTPClient) -> File:
-        return cls(
-            http,
-            data["id"],
-            parse_iso_timestamp(data["createdAt"]),
-            parse_iso_timestamp(data["updatedAt"]),
-            parse_iso_timestamp(data["deletesAt"]) if key_valid_not_none("deletesAt", data) else None,
-            data["favorite"],
-            data.get("originalName"),
-            data["name"],
-            data["size"],
-            data["type"],
-            data["views"],
-            data.get("maxViews"),
-            data.get("password"),
-            data.get("folderId"),
-            Thumbnail._from_data(data["thumbnail"]) if key_valid_not_none("thumbnail", data) else None,
-            [Tag._from_data(d, http=http) for d in data["tags"]] if "tags" in data else None,
-            data.get("url"),
-        )
-
+    @computed_field  # includes this in json output
     @property
     def full_url(self) -> str:
         """
@@ -189,10 +181,11 @@ class File:
         if self.url and (self.url.startswith("http://") or self.url.startswith("https://")):
             url = self.url
         else:
-            url = f"{self._http.base_url}{self.url}"
+            url = f"{self.http.base_url}{self.url}"
 
         return url
 
+    @computed_field  # includes this in json output
     @property
     def thumbnail_url(self) -> Optional[str]:
         """
@@ -204,7 +197,7 @@ class File:
         if not self.thumbnail:
             return None
 
-        return f"{self._http.base_url}/{self.thumbnail.path}"
+        return f"{self.http.base_url}/{self.thumbnail.path}"
 
     def is_password_protected(self) -> bool:
         """
@@ -233,7 +226,7 @@ class File:
         """
         params = {"pw": password}
         r = Route("GET", self.full_url)
-        return await self._http.request(r, params=params)
+        return await self.http.request(r, params=params)
 
     async def refresh(self) -> File:
         """|coro|
@@ -246,8 +239,8 @@ class File:
             A new instance with the latest information about this file.
         """
         r = Route("GET", f"/api/user/files/{self.id}")
-        data = await self._http.request(r)
-        return File._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return File(http=self.http, **data)
 
     async def delete(self) -> File:
         """|coro|
@@ -260,8 +253,8 @@ class File:
             A new instance with the latest information about this file.
         """
         r = Route("DELETE", f"/api/user/files/{self.id}")
-        data = await self._http.request(r)
-        return File._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return File(http=self.http, **data)
 
     async def edit(
         self,
@@ -317,8 +310,8 @@ class File:
             payload["type"] = type
 
         r = Route("PATCH", f"/api/user/files/{self.id}")
-        data = await self._http.request(r, json=payload)
-        return File._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return File(http=self.http, **data)
 
     async def add_favorite(self) -> File:
         """|coro|
@@ -340,8 +333,8 @@ class File:
 
         payload = {"favorite": True}
         r = Route("PATCH", f"/api/user/files/{self.id}")
-        data = await self._http.request(r, json=payload)
-        return File._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return File(http=self.http, **data)
 
     async def remove_favorite(self) -> File:
         """|coro|
@@ -363,8 +356,8 @@ class File:
 
         payload = {"favorite": False}
         r = Route("PATCH", f"/api/user/files/{self.id}")
-        data = await self._http.request(r, json=payload)
-        return File._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return File(http=self.http, **data)
 
     async def remove_from_folder(self):
         """|coro|
@@ -373,7 +366,7 @@ class File:
         """
         payload = {"delete": "file", "id": self.id}
         r = Route("DELETE", f"/api/user/folders/{self.folder_id}")
-        await self._http.request(r, json=payload)
+        await self.http.request(r, json=payload)
 
     async def read(self) -> bytes:
         """|coro|
@@ -388,14 +381,13 @@ class File:
         if self.url and (self.url.startswith("http://") or self.url.startswith("https://")):
             url = self.url
         else:
-            url = f"{self._http.base_url}{self.url}"
+            url = f"{self.http.base_url}{self.url}"
 
         r = Route("GET", url)
-        return await self._http.request(r)
+        return await self.http.request(r)
 
 
-@dataclass
-class Folder:
+class Folder(_ZiplineClientModel):
     """
     Represents a Folder on Zipline.
 
@@ -425,39 +417,32 @@ class Folder:
         The id of the user this folder belongs to.
     """
 
-    __slots__ = ("_http", "id", "created_at", "updated_at", "name", "public", "files", "user", "user_id")
-
-    _http: HTTPClient
     id: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
     name: str
     public: bool
-    files: Optional[List[File]]
-    user: Optional[User]
+    files: Optional[List[File]] = None
+    user: Optional[User] = None
     user_id: str
+
+    @field_validator("files", mode="before")
+    @classmethod
+    def _validate_files(cls, value: Any, info: ValidationInfo) -> Optional[List[File]]:
+        return [File(http=info.data["http"], **file_data) for file_data in value] if value else None
+
+    @field_validator("user", mode="before")
+    @classmethod
+    def _validate_user(cls, value: Any, info: ValidationInfo) -> Optional[User]:
+        return User(http=info.data["http"], **value) if value else None
 
     def __str__(self) -> str:
         return self.full_url
 
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /, *, http: HTTPClient) -> Folder:
-        return cls(
-            http,
-            data["id"],
-            parse_iso_timestamp(data["createdAt"]),
-            parse_iso_timestamp(data["updatedAt"]),
-            data["name"],
-            data["public"],
-            [File._from_data(file_data, http=http) for file_data in data["files"]] if "files" in data else None,
-            User._from_data(data["user"], http=http) if "user" in data else None,
-            data["userId"],
-        )
-
     @property
     def full_url(self) -> str:
         """A :class:`str` with the URL of the folder."""
-        return f"{self._http.base_url}/folder/{self.id}"
+        return f"{self.http.base_url}/folder/{self.id}"
 
     async def refresh(self) -> Folder:
         """|coro|
@@ -470,8 +455,8 @@ class Folder:
             A new instance with the latest information about this folder.
         """
         r = Route("GET", f"/api/user/folders/{self.id}")
-        data = await self._http.request(r)
-        return Folder._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return Folder(http=self.http, **data)
 
     async def delete(self) -> Folder:
         """|coro|
@@ -485,8 +470,8 @@ class Folder:
         """
         payload = {"delete": "folder"}
         r = Route("DELETE", f"/api/user/folders/{self.id}")
-        data = await self._http.request(r, json=payload)
-        return Folder._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return Folder(http=self.http, **data)
 
     async def edit(self, *, name: str) -> Folder:
         """|coro|
@@ -505,8 +490,8 @@ class Folder:
         """
         payload = {"name": name}
         r = Route("PATCH", f"/api/user/folders/{self.id}")
-        data = await self._http.request(r, json=payload)
-        return Folder._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return Folder(http=self.http, **data)
 
     async def remove_file(self, file: Union[File, str], /) -> Folder:
         """|coro|
@@ -529,8 +514,8 @@ class Folder:
         }
 
         r = Route("DELETE", f"/api/user/folders/{self.id}")
-        data = await self._http.request(r, json=payload)
-        return Folder._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return Folder(http=self.http, **data)
 
     async def add_file(self, file: Union[File, str], /) -> Folder:
         """|coro|
@@ -550,8 +535,8 @@ class Folder:
         payload = {"id": file.id if isinstance(file, File) else file}
 
         r = Route("PUT", f"/api/user/folders/{self.id}")
-        data = await self._http.request(r, json=payload)
-        return Folder._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return Folder(http=self.http, **data)
 
     async def add_files(self, files: Sequence[Union[File, str]], /) -> Folder:
         """|coro|
@@ -576,12 +561,11 @@ class Folder:
         }
 
         r = Route("PATCH", "/api/user/files/transaction")
-        data = await self._http.request(r, json=payload)
-        return Folder._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return Folder(http=self.http, **data)
 
 
-@dataclass
-class User:
+class User(_ZiplineClientModel):
     """
     Represents a Zipline user.
 
@@ -623,62 +607,28 @@ class User:
         The user's token.
     """
 
-    __slots__ = (
-        "_http",
-        "id",
-        "username",
-        "created_at",
-        "updated_at",
-        "role",
-        "view",
-        "sessions",
-        "oauth_providers",
-        "totp_secret",
-        "passkeys",
-        "quota",
-        "avatar",
-        "password",
-        "token",
-    )
-
-    _http: HTTPClient
     id: str
     username: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
     role: UserRole
-    view: Optional[UserViewSettings]
-    sessions: List[str]
-    oauth_providers: List[OAuthProvider]
-    totp_secret: Optional[str]
-    passkeys: Optional[List[UserPasskey]]
-    quota: Optional[UserQuota]
-    avatar: Optional[Avatar]
-    password: Optional[str]
-    token: Optional[str]
+    view: Optional[UserViewSettings] = None
+    sessions: List[str] = Field(default_factory=list)
+    oauth_providers: List[OAuthProvider] = Field(default_factory=list)
+    totp_secret: Optional[str] = None
+    passkeys: Optional[List[UserPasskey]] = None
+    quota: Optional[UserQuota] = None
+    avatar: Optional[Avatar] = None
+    password: Optional[str] = None
+    token: Optional[str] = None
+
+    @field_validator("quota", mode="before")
+    @classmethod
+    def _validate_quota(cls, value: Any, info: ValidationInfo) -> Optional[UserQuota]:
+        return UserQuota(http=info.data["http"], **value) if value else None
 
     def __str__(self) -> str:
         return self.username
-
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /, *, http: HTTPClient) -> User:
-        return cls(
-            http,
-            data["id"],
-            data["username"],
-            parse_iso_timestamp(data["createdAt"]),
-            parse_iso_timestamp(data["updatedAt"]),
-            UserRole(data["role"]),
-            UserViewSettings._from_data(data["view"]) if key_valid_not_none("view", data) else None,
-            data["sessions"],
-            [OAuthProvider._from_data(d) for d in data["oauthProviders"]],
-            data.get("totpSecret"),
-            [UserPasskey._from_data(d) for d in data["passkeys"]] if key_valid_not_none("passkeys", data) else None,
-            UserQuota._from_data(data["quota"], http=http) if key_valid_not_none("quota", data) else None,
-            Avatar.from_coded_string(data["avatar"]) if key_valid_not_none("avatar", data) else None,
-            data.get("password"),
-            data.get("token"),
-        )
 
     async def refresh(self) -> User:
         """|coro|
@@ -691,8 +641,8 @@ class User:
             A new instance with the latest information about this user.
         """
         r = Route("GET", f"/api/users/{self.id}")
-        data = await self._http.request(r)
-        return User._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return User(http=self.http, **data)
 
     async def edit(
         self,
@@ -739,8 +689,8 @@ class User:
             payload["quota"] = quota._to_dict()
 
         r = Route("PATCH", f"/api/users/{self.id}")
-        data = await self._http.request(r, json=payload)
-        return User._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return User(http=self.http, **data)
 
     async def delete(self, *, remove_data: bool = True) -> User:
         """|coro|
@@ -766,8 +716,8 @@ class User:
         """
         payload = {"delete": remove_data}
         r = Route("DELETE", f"/api/users/{self.id}")
-        data = await self._http.request(r, json=payload)
-        return User._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return User(http=self.http, **data)
 
     async def get_files(
         self,
@@ -829,12 +779,11 @@ class User:
             params["searchQuery"] = search_query
 
         r = Route("GET", "/api/user/files")
-        data = await self._http.request(r, params=params)
-        return UserFilesResponse._from_data(data, http=self._http)
+        data = await self.http.request(r, params=params)
+        return UserFilesResponse(**data)
 
 
-@dataclass
-class InviteUser:
+class InviteUser(_ZiplineClientModel):
     """
     User information provided with an :class:`~zipline.models.Invite`.
 
@@ -858,24 +807,12 @@ class InviteUser:
         The invite owner's account type.
     """
 
-    __slots__ = ("_http", "username", "id", "role")
-
-    _http: HTTPClient
     username: str
     id: str
     role: UserRole
 
     def __str__(self) -> str:
         return self.username
-
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /, *, http: HTTPClient) -> InviteUser:
-        return cls(
-            http,
-            data["username"],
-            data["id"],
-            UserRole(data["role"]),
-        )
 
     async def resolve(self) -> User:
         """|coro|
@@ -888,12 +825,11 @@ class InviteUser:
             The fully fledged user object.
         """
         r = Route("GET", f"/api/users/{self.id}")
-        data = await self._http.request(r)
-        return User._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return User(http=self.http, **data)
 
 
-@dataclass
-class Invite:
+class Invite(_ZiplineClientModel):
     """
     Represents an invite to a Zipline instance.
 
@@ -925,47 +861,23 @@ class Invite:
         The id of the user attributed to the creation of this invite.
     """
 
-    __slots__ = (
-        "_http",
-        "id",
-        "created_at",
-        "updated_at",
-        "expires_at",
-        "code",
-        "uses",
-        "max_uses",
-        "inviter",
-        "inviter_id",
-    )
-
-    _http: HTTPClient
     id: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
-    expires_at: Optional[datetime.datetime]
+    expires_at: Optional[datetime.datetime] = None
     code: str
     uses: int
-    max_uses: Optional[int]
+    max_uses: Optional[int] = None
     inviter: InviteUser
     inviter_id: str
 
+    @field_validator("inviter", mode="before")
+    @classmethod
+    def _validate_inviter(cls, value: Any, info: ValidationInfo) -> InviteUser:
+        return InviteUser(http=info.data["http"], **value)
+
     def __str__(self) -> str:
         return self.url
-
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /, *, http: HTTPClient) -> Invite:
-        return cls(
-            http,
-            data["id"],
-            parse_iso_timestamp(data["createdAt"]),
-            parse_iso_timestamp(data["updatedAt"]),
-            parse_iso_timestamp(data["expiresAt"]) if key_valid_not_none("expiresAt", data) else None,
-            data["code"],
-            data["uses"],
-            data.get("maxUses"),
-            InviteUser._from_data(data["inviter"], http=http),
-            data["inviterId"],
-        )
 
     @property
     def url(self) -> str:
@@ -975,7 +887,7 @@ class Invite:
         :class:`str`
             The full url of this invite.
         """
-        return f"{self._http.base_url}/auth/register?code={self.code}"
+        return f"{self.http.base_url}/auth/register?code={self.code}"
 
     async def delete(self) -> Invite:
         """|coro|
@@ -988,13 +900,13 @@ class Invite:
             A new instance with the latest information about this invite.
         """
         r = Route("DELETE", f"/api/auth/invites/{self.id}")
-        data = await self._http.request(r)
-        return Invite._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return Invite(http=self.http, **data)
 
     async def refresh(self) -> Invite:
         """|coro|
 
-        Retreive updated information about this invite.
+        Retrieve updated information about this invite.
 
         Returns
         -------
@@ -1002,11 +914,11 @@ class Invite:
             A new instance with the latest information about this invite.
         """
         r = Route("GET", f"/api/auth/invites/{self.id}")
-        data = await self._http.request(r)
-        return Invite._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return Invite(http=self.http, **data)
 
 
-class TagFile:
+class TagFile(_ZiplineClientModel):
     """
     Partial file given with Tags.
 
@@ -1020,11 +932,7 @@ class TagFile:
         The internal id of the :class:`~zipline.models.File` represented.
     """
 
-    __slots__ = ("_http", "id")
-
-    def __init__(self, http: HTTPClient, id: str):
-        self._http = http
-        self.id = id
+    id: str
 
     async def resolve(self) -> File:
         """|coro|
@@ -1037,12 +945,11 @@ class TagFile:
             The fully fledged file object.
         """
         r = Route("GET", f"/api/user/files/{self.id}")  # NOTE: Undocumented // Not officially used in the frontend.
-        data = await self._http.request(r)
-        return File._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return File(http=self.http, **data)
 
 
-@dataclass
-class Tag:
+class Tag(_ZiplineClientModel):
     """
     Represents a tag on Zipline.
 
@@ -1068,30 +975,20 @@ class Tag:
         Partial files associated with this tag, if available.
     """
 
-    __slots__ = ("_http", "id", "created_at", "updated_at", "name", "color", "files")
-
-    _http: HTTPClient
     id: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
     name: str
     color: str
-    files: Optional[List[TagFile]]
+    files: Optional[List[TagFile]] = None
+
+    @field_validator("files", mode="before")
+    @classmethod
+    def _validate_files(cls, value: Any, info: ValidationInfo) -> Optional[List[TagFile]]:
+        return [TagFile(http=info.data["http"], **file_data) for file_data in value] if value else None
 
     def __str__(self) -> str:
         return self.name
-
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /, *, http: HTTPClient) -> Tag:
-        return cls(
-            http,
-            data["id"],
-            parse_iso_timestamp(data["createdAt"]),
-            parse_iso_timestamp(data["updatedAt"]),
-            data["name"],
-            data["color"],
-            [TagFile(http, r["id"]) for r in data["files"]] if "files" in data else None,
-        )
 
     async def edit(self, color: Optional[str] = None, name: Optional[str] = None) -> Tag:
         """|coro|
@@ -1105,7 +1002,7 @@ class Tag:
 
             .. note::
 
-                Must be in hex format with preceeding #
+                Must be in hex format with preceding #
 
                 ex. #rrggbb
         name: Optional[:class:`str`]
@@ -1124,8 +1021,8 @@ class Tag:
             payload["name"] = name
 
         r = Route("PATCH", f"/api/user/tags/{self.id}")
-        data = await self._http.request(r, json=payload)
-        return Tag._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return Tag(http=self.http, **data)
 
     async def delete(self) -> Tag:
         """|coro|
@@ -1138,8 +1035,8 @@ class Tag:
             A new instance with the latest information about this tag.
         """
         r = Route("DELETE", f"/api/user/tags/{self.id}")
-        data = await self._http.request(r)
-        return Tag._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return Tag(http=self.http, **data)
 
     async def refresh(self) -> Tag:
         """|coro|
@@ -1152,12 +1049,11 @@ class Tag:
             A new instance with the latest information about this tag.
         """
         r = Route("GET", f"/api/user/tags/{self.id}")
-        data = await self._http.request(r)
-        return Tag._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return Tag(http=self.http, **data)
 
 
-@dataclass
-class URL:
+class URL(_ZiplineClientModel):
     """
     Represents a shortened url on Zipline.
 
@@ -1195,57 +1091,28 @@ class URL:
         The id of the user this url belongs to.
     """
 
-    __slots__ = (
-        "_http",
-        "id",
-        "created_at",
-        "updated_at",
-        "code",
-        "vanity",
-        "destination",
-        "views",
-        "max_views",
-        "password",
-        "enabled",
-        "user",
-        "user_id",
-    )
-
-    _http: HTTPClient
     id: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
     code: str  # The part of the url that redirects. <base_url>/go/<code>
-    vanity: Optional[str]
+    vanity: Optional[str] = None
     destination: str
     views: int
-    max_views: Optional[int]
-    password: Optional[str]
+    max_views: Optional[int] = None
+    password: Optional[str] = None
     enabled: bool
-    user: Optional[User]
+    user: Optional[User] = None
     user_id: str
+
+    @field_validator("user", mode="before")
+    @classmethod
+    def _validate_user(cls, value: Any, info: ValidationInfo) -> Optional[User]:
+        return User(http=info.data["http"], **value) if value else None
 
     def __str__(self) -> str:
         return self.full_url
 
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /, *, http: HTTPClient) -> URL:
-        return cls(
-            http,
-            data["id"],
-            parse_iso_timestamp(data["createdAt"]),
-            parse_iso_timestamp(data["updatedAt"]),
-            data["code"],
-            data.get("vanity"),
-            data["destination"],
-            data["views"],
-            data.get("maxViews"),
-            data.get("password"),
-            data["enabled"],
-            User._from_data(data["user"], http=http) if "user" in data else None,
-            data["userId"],
-        )
-
+    @computed_field  # includes this in json output
     @property
     def full_url(self) -> str:
         """
@@ -1255,7 +1122,7 @@ class URL:
             The full url.
         """
         code = self.vanity or self.code
-        return f"{self._http.base_url}/go/{code}"
+        return f"{self.http.base_url}/go/{code}"
 
     async def edit(
         self,
@@ -1301,8 +1168,8 @@ class URL:
             payload["password"] = password
 
         r = Route("PATCH", f"/api/user/urls/{self.id}")
-        data = await self._http.request(r, json=payload)
-        return URL._from_data(data, http=self._http)
+        data = await self.http.request(r, json=payload)
+        return URL(http=self.http, **data)
 
     async def delete(self) -> URL:
         """|coro|
@@ -1315,12 +1182,11 @@ class URL:
             A new instance with the latest information about this url.
         """
         r = Route("DELETE", f"/api/user/urls/{self.id}")
-        data = await self._http.request(r)
-        return URL._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return URL(http=self.http, **data)
 
 
-@dataclass
-class UploadFile:
+class UploadFile(_ZiplineClientModel):
     """
     File data given by the API when a file is uploaded.
 
@@ -1345,24 +1211,12 @@ class UploadFile:
         The url for the uploaded file.
     """
 
-    __slots__ = ("_http", "id", "type", "url")
-
-    _http: HTTPClient
     id: str
     type: str
     url: str
 
     def __str__(self) -> str:
         return self.url
-
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /, *, http: HTTPClient) -> UploadFile:
-        return cls(
-            http,
-            data["id"],
-            data["type"],
-            data["url"],
-        )
 
     async def resolve(self) -> File:
         """|coro|
@@ -1375,12 +1229,11 @@ class UploadFile:
             The fully fledged object
         """
         r = Route("GET", f"/api/user/files/{self.id}")  # NOTE: Undocumented // Not officially used in the frontend.
-        data = await self._http.request(r)
-        return File._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return File(http=self.http, **data)
 
 
-@dataclass
-class UploadResponse:
+class UploadResponse(_ZiplineClientModel):
     """
     Response given by the API when a file or multiple files are uploaded.
 
@@ -1388,30 +1241,26 @@ class UploadResponse:
     ----------
     files: List[:class:`~zipline.models.UploadFile`]
         A list of information about the files uploaded.
+    deletes_at: Optional[:class:`datetime.datetime`]
+        The scheduled deletion time of the uploaded files, if applicable.
     """
 
-    __slots__ = ("_http", "files", "deletes_at")
-
-    _http: HTTPClient
     files: List[UploadFile]
-    deletes_at: Optional[datetime.datetime]
+    deletes_at: Optional[datetime.datetime] = None
 
+    @field_validator("files", mode="before")
     @classmethod
-    def _from_data(cls, data: Dict[str, Any], /, *, http: HTTPClient) -> UploadResponse:
-        return cls(
-            http,
-            [UploadFile._from_data(uf, http=http) for uf in data["files"]],
-            parse_iso_timestamp(data["deletesAt"]) if "deletesAt" in data else None,
-        )
+    def _validate_files(cls, value: Any, info: ValidationInfo) -> List[UploadFile]:
+        return [UploadFile(http=info.data["http"], **file_data) for file_data in value]
 
 
-class FileData:
+class FileData(ZiplineModel):
     """
     Used to upload a File to Zipline.
 
     Attributes
     ----------
-    data: Union[:class:`str`, :class:`bytes`, :class:`os.PathLike`, :class:`io.BufferedIOBase`]
+    obj: Union[:class:`str`, :class:`bytes`, :class:`os.PathLike`, :class:`io.BufferedIOBase`]
         The file or file like object to open.
     filename: Optional[:class:`str`]
         The name of the file to be uploaded. Defaults to filename of the given path, if applicable.
@@ -1419,69 +1268,80 @@ class FileData:
         The MIME type of the file, if None the lib will attempt to determine it.
     """
 
-    __slots__ = ("filename", "data", "mimetype")
+    obj: Union[str, bytes, os.PathLike, io.BufferedIOBase]
+    filename: Optional[str] = Field(default=None, validate_default=True)
+    mimetype: Optional[str] = Field(default=None, validate_default=True)
 
-    def __init__(
-        self,
-        data: Union[str, bytes, os.PathLike[Any], io.BufferedIOBase],
-        filename: Optional[str] = None,
-        *,
-        mimetype: Optional[str] = None,
-    ) -> None:
-        """Used to upload a file to Zipline.
+    @field_validator("filename")
+    @classmethod
+    def _validate_filename(cls, filename: Optional[str], info: ValidationInfo) -> Optional[str]:
+        obj = info.data["obj"]
+        if filename is None:
+            if isinstance(obj, str):
+                _, filename = os.path.split(obj)
+            else:
+                filename = getattr(obj, "name", "untitled")
+        return filename
 
-        Parameters
-        ----------
-        data: Union[:class:`str`, :class:`bytes`, :class:`os.PathLike`, :class:`io.BufferedIOBase`]
-            The file or file like object to open.
-        filename: Optional[:class:`str`]
-            The name of the file to be uploaded. Defaults to filename of the given path, if applicable.
-        mimetype: Optional[:class:`str`]
-            The MIME type of the file, if None the library will attempt to determine it.
-
-        Raises
-        ------
-        ValueError
-            An invalid value was passed to the data parameter.
-        TypeError
-            The MIME type of the file could not be determined and was not provided.
-        """
-        if isinstance(data, io.IOBase):
-            if not (data.seekable() and data.readable()):
-                raise ValueError(f"File buffer {data!r} must be seekable and readable")
-            self.data: io.BufferedIOBase = data
-        else:
-            self.data = open(data, "rb")
-
+    @field_validator("mimetype")
+    @classmethod
+    def _validate_mimetype(cls, mimetype: Optional[str], info: ValidationInfo) -> Optional[str]:
+        obj = info.data["obj"]
+        filename = info.data["filename"]
         # Mime type determination. Strategy is:
         #   - an explicitly given type
         #   - a guessed type based on the filename, if present.
         #   - a guessed type based on magic bytes
         #   - application/octet-stream as a fallback.
+        guessed_mime = None
         if mimetype is not None:
             guessed_mime = mimetype
         elif filename is not None:
             guessed_mime = mimetypes.guess_type(filename)[0]
         elif filename is None and mimetype is None:
-            guessed_mime = guess_mimetype_by_magicnumber(self.data.read(16))
-            # back it up again
-            self.data.seek(0)
+            with cls._open_file(obj) as file:
+                guessed_mime = guess_mimetype_by_magicnumber(file.read(16))
 
-        self.mimetype = guessed_mime or "application/octet-stream"
+        return guessed_mime or "application/octet-stream"
 
-        if filename is None:
-            if isinstance(data, str):
-                _, filename = os.path.split(data)
-            else:
-                filename = getattr(data, "name", "untitled")
+    def data(self) -> io.BufferedReader | io.BufferedIOBase:
+        """A seekable, readable file object representing the input data.
 
-        self.filename = filename
+        Returns
+        -------
+        Union[io.BufferedReader, io.BufferedIOBase]
+            A file-like object that can be read and seek'ed through.
+            - For path-like inputs: Returns an opened file in binary read mode
+            - For file-like inputs: Returns the original object if it's seekable and readable
 
-        if self.mimetype is None:
-            raise TypeError("could not determine mimetype of file given")
+        Raises
+        ------
+        ValueError
+            If the input is a file-like object that is not both seekable and readable
+        OSError
+            If the input is a path and the file cannot be opened
+
+        Examples
+        --------
+        >>> file_data = FileData(obj="path/to/file.txt")
+        >>> with file_data.data() as f:
+        ...     content = f.read()
+        """
+        return self._open_file(self.obj)
+
+    @staticmethod
+    def _open_file(
+        obj: Union[str, bytes, os.PathLike, io.BufferedIOBase],
+    ) -> Union[io.BufferedReader, io.BufferedIOBase]:
+        if isinstance(obj, io.IOBase):
+            if not (obj.seekable() and obj.readable()):
+                raise ValueError(f"File buffer {obj!r} must be seekable and readable")
+            return obj
+        else:
+            return open(obj, "rb")
 
 
-class PartialQuota:
+class PartialQuota(ZiplineModel):
     """
     A partial quota useful for creating a new quota for a :class:`~zipline.models.User`.
 
@@ -1503,26 +1363,34 @@ class PartialQuota:
             This argument may be omitted. If None is passed there will be no limit.
     """
 
-    def __init__(self, type: QuotaType, value: Optional[int] = None, max_urls: Optional[int] = MISSING):
-        if self.value and self.value < 0:
-            raise ValueError("quota amount must be greater than or equal to zero.")
+    type: QuotaType
+    value: Optional[int] = None
+    max_urls: Optional[int] = Field(default=MISSING, validate_default=True)
 
-        if self.type is not QuotaType.none and self.value is None:
-            raise ValueError("value must be given to this quota unless type is none.")
+    @field_validator("value")
+    @classmethod
+    def validate_value(cls, v: Optional[int], info: ValidationInfo) -> Optional[int]:
+        if "type" not in info.data:
+            return v
 
-        if isinstance(max_urls, int) and max_urls <= 0:
-            raise ValueError("max_urls must be greater than or equal to zero.")
+        if info.data["type"] is not QuotaType.none and v is None:
+            raise ValueError("value must be given to this quota unless type is none")
+        if v is not None and v < 0:
+            raise ValueError("quota amount must be greater than or equal to zero")
+        return v
 
-        self.type = type
-        self.value = value
-        self.max_urls = max_urls
+    @field_validator("max_urls")
+    @classmethod
+    def validate_max_urls(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v <= 0:
+            raise ValueError("max_urls must be greater than or equal to zero")
+        return v
 
     def _to_dict(self) -> Dict[str, Any]:
         return generate_quota_payload(self.type, self.value, self.max_urls)
 
 
-@dataclass
-class UserQuota:
+class UserQuota(_ZiplineClientModel):
     """
     Represents a quota assigned to a :class:`~zipline.models.User` in Zipline.
 
@@ -1555,44 +1423,20 @@ class UserQuota:
         The id of the user this quota is assigned to, if given.
     """
 
-    __slots__ = (
-        "_http",
-        "id",
-        "created_at",
-        "updated_at",
-        "files_quota",
-        "max_bytes",
-        "max_files",
-        "max_urls",
-        "user",
-        "user_id",
-    )
-
-    _http: HTTPClient
     id: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
     files_quota: QuotaType
-    max_bytes: Optional[str]
-    max_files: Optional[int]
-    max_urls: Optional[int]
-    user: Optional[User]
-    user_id: Optional[str]
+    max_bytes: Optional[str] = None
+    max_files: Optional[int] = None
+    max_urls: Optional[int] = None
+    user: Optional[User] = None
+    user_id: Optional[str] = None
 
+    @field_validator("user", mode="before")
     @classmethod
-    def _from_data(cls, data: Dict[str, Any], /, *, http: HTTPClient) -> UserQuota:
-        return cls(
-            http,
-            data["id"],
-            parse_iso_timestamp(data["createdAt"]),
-            parse_iso_timestamp(data["updatedAt"]),
-            QuotaType(data["filesQuota"]),
-            data.get("maxBytes"),
-            data.get("maxFiles"),
-            data.get("maxUrls"),
-            User._from_data(data["user"], http=http) if "user" in data else None,
-            data.get("userId"),
-        )
+    def _validate_user(cls, value: Any, info: ValidationInfo) -> User:
+        return User(http=info.data["http"], **value)
 
     def _to_dict(self) -> Dict[str, Any]:
         return generate_quota_payload(self.type, self._amount(), self.max_urls)
@@ -1635,12 +1479,11 @@ class UserQuota:
             raise TypeError("cannot resolve user with null id.")
 
         r = Route("GET", f"/api/users/{self.id}")
-        data = await self._http.request(r)
-        return User._from_data(data, http=self._http)
+        data = await self.http.request(r)
+        return User(http=self.http, **data)
 
 
-@dataclass
-class UserPasskey:
+class UserPasskey(ZiplineModel):
     """
     A passkey a Zipline :class:`~zipline.models.User` has set up.
 
@@ -1662,33 +1505,18 @@ class UserPasskey:
         The id of the :class:`~zipline.models.User` that this passkey belongs to.
     """
 
-    __slots__ = ("id", "created_at", "updated_at", "last_used", "name", "reg", "user_id")
-
     id: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
-    last_used: Optional[datetime.datetime]
+    last_used: Optional[datetime.datetime] = None
     name: str
     reg: JSON
     user_id: str  # NOTE: This does expose a `User` attr in the api.
     #                     Not inclined to expose it because it'd complicate this class
     #                     for minimal gain as this should already be attached to a User object.
 
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /) -> UserPasskey:
-        return cls(
-            data["id"],
-            parse_iso_timestamp(data["createdAt"]),
-            parse_iso_timestamp(data["updatedAt"]),
-            parse_iso_timestamp(data["lastUsed"]) if "lastUsed" in data else None,
-            data["name"],
-            data["reg"],
-            data["userId"],
-        )
 
-
-@dataclass
-class OAuthProvider:
+class OAuthProvider(ZiplineModel):
     """
     Represents an OAuth provider being used by a :class:`~zipline.models.User` on Zipline.
 
@@ -1714,18 +1542,6 @@ class OAuthProvider:
         The oauth id for this entry.
     """
 
-    __slots__ = (
-        "id",
-        "created_at",
-        "updated_at",
-        "user_id",
-        "provider",
-        "username",
-        "access_token",
-        "refresh_token",
-        "oauth_id",
-    )
-
     id: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
@@ -1736,22 +1552,8 @@ class OAuthProvider:
     refresh_token: Optional[str]
     oauth_id: Optional[str]
 
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /) -> OAuthProvider:
-        return cls(
-            data["id"],
-            parse_iso_timestamp(data["createdAt"]),
-            parse_iso_timestamp(data["updatedAt"]),
-            data["userId"],
-            OAuthProviderType(data["provider"]),
-            data["username"],
-            data["accessToken"],
-            data.get("refreshToken"),
-            data.get("oauthId"),
-        )
 
-
-class Thumbnail:
+class Thumbnail(ZiplineModel):
     """
     Thumbnail data for a Zipline :class:`~zipline.models.File`.
 
@@ -1761,18 +1563,10 @@ class Thumbnail:
         The path to this thumbnail.
     """
 
-    __slots__ = ("path",)
-
-    def __init__(self, path: str):
-        self.path = path
-
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /) -> Thumbnail:
-        return cls(data["path"])
+    path: str
 
 
-@dataclass
-class UserViewSettings:
+class UserViewSettings(ZiplineModel):
     """
     Represents view settings for a Zipline :class:`~zipline.models.User`.
 
@@ -1798,45 +1592,18 @@ class UserViewSettings:
         The name of the site the embed will redirect to, if applicable.
     """
 
-    __slots__ = (
-        "enabled",
-        "align",
-        "show_mimetype",
-        "content",
-        "embed",
-        "embed_title",
-        "embed_description",
-        "embed_color",
-        "embed_site_name",
-    )
-
-    enabled: Optional[bool]
-    align: Optional[Literal["left", "center", "right"]]
-    show_mimetype: Optional[bool]
-    content: Optional[str]
-    embed: Optional[bool]
-    embed_title: Optional[str]
-    embed_description: Optional[str]
-    embed_color: Optional[str]
-    embed_site_name: Optional[str]
-
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /) -> UserViewSettings:
-        return cls(
-            data.get("enabled"),
-            data.get("align"),
-            data.get("showMimetype"),
-            data.get("content"),
-            data.get("embed"),
-            data.get("embedTitle"),
-            data.get("embedDescription"),
-            data.get("embedColor"),
-            data.get("embedSiteName"),
-        )
+    enabled: Optional[bool] = None
+    align: Optional[Literal["left", "center", "right"]] = None
+    show_mimetype: Optional[bool] = None
+    content: Optional[str] = None
+    embed: Optional[bool] = None
+    embed_title: Optional[str] = None
+    embed_description: Optional[str] = None
+    embed_color: Optional[str] = None
+    embed_site_name: Optional[str] = None
 
 
-@dataclass
-class ServerVersionInfo:
+class ServerVersionInfo(ZiplineModel):
     """
     Version information for a Zipline instance.
 
@@ -1846,17 +1613,10 @@ class ServerVersionInfo:
         The current version being used.
     """
 
-    __slots__ = ("version",)
-
     version: str
 
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /) -> ServerVersionInfo:
-        return cls(data["version"])
 
-
-@dataclass
-class UserStats:
+class UserStats(ZiplineModel):
     """
     Stats for a Zipline :class:`~zipline.models.User`.
 
@@ -1882,18 +1642,6 @@ class UserStats:
         A mapping of MIME type to number of files uploaded.
     """
 
-    __slots__ = (
-        "files_uploaded",
-        "favorite_files",
-        "views",
-        "avg_views",
-        "storage_used",
-        "avg_storage_used",
-        "urls_created",
-        "url_views",
-        "sort_type_count",
-    )
-
     files_uploaded: int
     favorite_files: int
     views: int
@@ -1904,23 +1652,8 @@ class UserStats:
     url_views: int
     sort_type_count: Dict[str, int]
 
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /) -> UserStats:
-        return cls(
-            data["filesUploaded"],
-            data["favoriteFiles"],
-            data["views"],
-            data["avgViews"],
-            data["storageUsed"],
-            data["avgStorageUsed"],
-            data["urlsCreated"],
-            data["urlViews"],
-            data["sortTypeCount"],
-        )
 
-
-@dataclass
-class UserFilesResponse:
+class UserFilesResponse(ZiplineModel):
     """
     Represents a response to a file search on Zipline.
 
@@ -1936,20 +1669,10 @@ class UserFilesResponse:
         The number of pages available.
     """
 
-    __slots__ = ("page", "search", "total", "pages")
     page: List[File]
-    search: Optional[Dict[str, Any]]
-    total: Optional[int]
-    pages: Optional[int]
-
-    @classmethod
-    def _from_data(cls, data: Dict[str, Any], /, *, http: HTTPClient) -> UserFilesResponse:
-        return cls(
-            [File._from_data(d, http=http) for d in data["page"]],
-            data.get("search"),
-            data.get("total"),
-            data.get("pages"),
-        )
+    search: Optional[Dict[str, Any]] = None
+    total: Optional[int] = None
+    pages: Optional[int] = None
 
     @property
     def files(self) -> List[File]:
@@ -1957,7 +1680,7 @@ class UserFilesResponse:
         return self.page
 
 
-class Avatar:
+class Avatar(ZiplineModel):
     """
     Wraps the representation of avatars in Zipline.
 
@@ -1971,18 +1694,26 @@ class Avatar:
     ----------
     data: :class:`bytes`
         The avatar data itself.
-    mime: Optional[:class:`str`]
+    mime: :class:`str`
         The MIME type of the data. If not given the library will attempt to guess the type.
+
+        .. versionchanged:: 0.28.0
+
+            This attribute is no longer optional.
     """
 
-    __slots__ = ("data", "mime")
+    data: bytes
+    mime: str
 
-    def __init__(self, data: bytes, mime: Optional[str] = None):
-        self.data = data
-        self.mime = mime or guess_mimetype_by_magicnumber(data[:16])
-
-        if not self.mime:
-            raise ZiplineError("could not determine mimetype of avatar and one was not provided.")
+    @field_validator("mime", mode="before")
+    @classmethod
+    def _mime_validator(cls, v: Any, info: ValidationInfo) -> Any:
+        if isinstance(v, str):
+            return v
+        mime_guess = guess_mimetype_by_magicnumber(info.data["data"][:16])
+        if mime_guess:
+            return mime_guess
+        raise ValueError("Could not determine mimetype of avatar and one was not provided.")
 
     def __str__(self) -> str:
         return self.to_payload_str()
@@ -2002,7 +1733,7 @@ class Avatar:
         mime_part = mime_part[5:]
         data = base64.b64decode(data[7:])
 
-        return cls(data, mime_part)
+        return cls(data=data, mime=mime_part)
 
     def to_payload_str(self) -> str:
         """
@@ -2012,13 +1743,5 @@ class Avatar:
         -------
         :class:`str`
             The string for use in requests.
-
-        Raises
-        ------
-        ZiplineError
-            MIME type is None.
         """
-        if self.mime is None:
-            raise ZiplineError("mimetype undefined in Avatar, cannot export to payload string.")
-
         return build_avatar_payload(self.mime, self.data)

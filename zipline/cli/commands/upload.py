@@ -2,7 +2,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Union
 
-from rich import print
+from rich import print, print_json
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from typer import Argument, FileBinaryRead, Option, Typer
 
@@ -57,17 +57,17 @@ async def upload(
         prompt=True,
         hide_input=True,
     ),
-    print_object: bool = Option(
+    use_json: bool = Option(
         ...,
-        "--object/--text",
-        "-o/-O",
+        "--json/--text",
+        "-j/-J",
         default_factory=sys.stdout.isatty,
         help=(
             "Choose how to format the output. "
-            "If --text (or piped), you'll get a link to the uploaded file; "
-            "if --object (or on a TTY), you'll get the raw Python object."
+            "If --text (or piped), you'll get links to the uploaded files; "
+            "if --object (or on a TTY), you'll get the raw Python object as JSON."
         ),
-        envvar="ZIPLINE_PRINT_OBJECT",
+        envvar="ZIPLINE_PRINT_JSON",
     ),
     format: Optional[NameFormat] = Option(
         None,
@@ -153,7 +153,7 @@ async def upload(
         for file in files:
             payload.append(
                 FileData(
-                    data=file,
+                    obj=file,
                     filename=override_name or file.name,
                 )
             )
@@ -181,4 +181,7 @@ async def upload(
             except Exception as exception:
                 handle_api_errors(exception, server_url, traceback=verbose)
 
-        print(upload if print_object else " ".join(file.url for file in upload.files))
+        if use_json:
+            print_json(data=upload.__json__())
+        else:
+            print(" ".join(file.url for file in upload.files))

@@ -95,7 +95,7 @@ class Client:
         """
         r = Route("GET", "/api/version")
         data = await self.http.request(r)
-        return ServerVersionInfo._from_data(data)
+        return ServerVersionInfo(**data)
 
     async def get_user_stats(self) -> UserStats:
         """|coro|
@@ -109,7 +109,7 @@ class Client:
         """
         r = Route("GET", "/api/user/stats")
         data = await self.http.request(r)
-        return UserStats._from_data(data)
+        return UserStats(**data)
 
     async def create_user(
         self,
@@ -170,7 +170,7 @@ class Client:
 
         r = Route("POST", "/api/users")
         data = await self.http.request(r, json=json)
-        return User._from_data(data, http=self.http)
+        return User(http=self.http, **data)
 
     async def get_user(self, id: str, /) -> User:
         """|coro|
@@ -196,7 +196,7 @@ class Client:
         """
         r = Route("GET", f"/api/users/{id}")
         data = await self.http.request(r)
-        return User._from_data(data, http=self.http)
+        return User(http=self.http, **data)
 
     async def get_all_users(self) -> List[User]:
         """|coro|
@@ -215,7 +215,7 @@ class Client:
         """
         r = Route("GET", "/api/users")
         data = await self.http.request(r)
-        return [User._from_data(data, http=self.http) for data in data]
+        return [User(http=self.http, **data) for data in data]
 
     async def delete_user(self, id, /, *, remove_data: bool = True) -> User:
         """|coro|
@@ -244,7 +244,7 @@ class Client:
         payload = {"delete": remove_data}
         r = Route("DELETE", f"/api/users/{id}")
         data = await self.http.request(r, json=payload)
-        return User._from_data(data, http=self.http)
+        return User(http=self.http, **data)
 
     async def get_all_invites(self) -> List[Invite]:
         """|coro|
@@ -269,7 +269,7 @@ class Client:
         """
         r = Route("GET", "/api/auth/invites")
         data = await self.http.request(r)
-        return [Invite._from_data(d, http=self.http) for d in data]
+        return [Invite(http=self.http, **d) for d in data]
 
     async def create_invite(
         self,
@@ -335,7 +335,7 @@ class Client:
 
         r = Route("POST", "/api/auth/invites")
         data = await self.http.request(r, json=payload)
-        return Invite._from_data(data, http=self.http)
+        return Invite(http=self.http, **data)
 
     async def delete_invite(self, id: str, /) -> Invite:
         """|coro|
@@ -361,7 +361,7 @@ class Client:
         """
         r = Route("DELETE", f"/api/auth/invites/{id}")
         data = await self.http.request(r)
-        return Invite._from_data(data, http=self.http)
+        return Invite(http=self.http, **data)
 
     async def get_all_folders(self, *, with_files: bool = True) -> List[Folder]:
         """|coro|
@@ -385,7 +385,7 @@ class Client:
 
         r = Route("GET", "/api/user/folders")
         data = await self.http.request(r, params=params)
-        return [Folder._from_data(d, http=self.http) for d in data]
+        return [Folder(http=self.http, **d) for d in data]
 
     async def create_folder(
         self,
@@ -425,7 +425,7 @@ class Client:
 
         r = Route("POST", "/api/user/folders")
         data = await self.http.request(r, json=payload)
-        return Folder._from_data(data, http=self.http)
+        return Folder(http=self.http, **data)
 
     async def get_folder(self, id: str, /) -> Folder:
         """|coro|
@@ -451,7 +451,7 @@ class Client:
         """
         r = Route("GET", f"/api/user/folders/{id}")
         data = await self.http.request(r)
-        return Folder._from_data(data, http=self.http)
+        return Folder(http=self.http, **data)
 
     async def get_all_urls(self) -> List[URL]:
         """|coro|
@@ -465,7 +465,7 @@ class Client:
         """
         r = Route("GET", "/api/user/urls")
         data = await self.http.request(r)
-        return [URL._from_data(d, http=self.http) for d in data]
+        return [URL(http=self.http, **d) for d in data]
 
     async def shorten_url(
         self,
@@ -523,7 +523,7 @@ class Client:
 
         r = Route("POST", "/api/user/urls")
         data = await self.http.request(r, headers=headers, json=payload)
-        return URL._from_data(data, http=self.http)
+        return URL(http=self.http, **data)
 
     async def delete_url(self, id: str, /) -> URL:
         """|coro|
@@ -549,7 +549,7 @@ class Client:
         """
         r = Route("DELETE", f"/api/user/urls/{id}")
         data = await self.http.request(r)
-        return URL._from_data(data, http=self.http)
+        return URL(http=self.http, **data)
 
     async def get_all_tags(self) -> List[Tag]:
         """|coro|
@@ -563,7 +563,7 @@ class Client:
         """
         r = Route("GET", "/api/user/tags")
         data = await self.http.request(r)
-        return [Tag._from_data(d, http=self.http) for d in data]
+        return [Tag(http=self.http, **d) for d in data]
 
     async def get_tag(self, id: str, /) -> Tag:
         """|coro|
@@ -589,7 +589,7 @@ class Client:
         """
         r = Route("GET", f"/api/user/tags/{id}")
         data = await self.http.request(r)
-        return Tag._from_data(data, http=self.http)
+        return Tag(http=self.http, **data)
 
     async def delete_tag(self, id: str, /) -> Tag:
         """|coro|
@@ -615,7 +615,7 @@ class Client:
         """
         r = Route("DELETE", f"/api/user/tags/{id}")
         data = await self.http.request(r)
-        return Tag._from_data(data, http=self.http)
+        return Tag(http=self.http, **data)
 
     async def get_files(
         self,
@@ -674,7 +674,7 @@ class Client:
 
         r = Route("GET", "/api/user/files")
         data = await self.http.request(r, params=params)
-        return UserFilesResponse._from_data(data, http=self.http)
+        return UserFilesResponse(**data)
 
     async def iter_files(
         self,
@@ -786,7 +786,7 @@ class Client:
         query_params = {"take": amount, "filter": filter.value}
         r = Route("GET", "/api/user/recent")
         data = await self.http.request(r, params=query_params)
-        return [File._from_data(d, http=self.http) for d in data]
+        return [File(http=self.http, **d) for d in data]
 
     @overload
     async def upload_file(
@@ -948,11 +948,12 @@ class Client:
 
         formdata = aiohttp.FormData()
         for file in payload:
-            formdata.add_field("file", file.data, filename=file.filename, content_type=file.mimetype)
+            with file.data() as f:
+                formdata.add_field("file", f.read(), filename=file.filename, content_type=file.mimetype)
 
         r = Route("POST", "/api/upload")
         data = await self.http.request(r, headers=headers, data=formdata)
-        return UploadResponse._from_data(data, http=self.http) if text_only is False else data
+        return UploadResponse(http=self.http, **data) if text_only is False else data
 
     async def close(self) -> None:
         """|coro|

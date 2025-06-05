@@ -19,7 +19,11 @@ classifiers = [
     "Development Status :: 4 - Beta",
 ]
 keywords = ["zipline", "api wrapper"]
-dependencies = ["aiohttp>=3.7.4,<4"]
+dependencies = [
+    "aiohttp>=3.7.4,<4",
+    "casefy>=1.1.0",
+    "pydantic>=2.10.6",
+]
 requires-python = ">=3.8"
 dynamic = ["version"]
 
